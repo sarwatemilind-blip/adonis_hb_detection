@@ -1,0 +1,10 @@
+{
+  "name": "Adonis Hb Screen V2",
+  "short_name": "Adonis Hb V2",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f4f7f8",
+  "theme_color": "#123f4d",
+  "description": "Standalone conjunctival-image haemoglobin screening prototype with deterministic conjunctiva-focused analysis.",
+  "icons": []
+}
