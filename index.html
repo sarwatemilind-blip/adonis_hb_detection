@@ -234,8 +234,11 @@ function calculateCropQualityScore(feats) {
   let score = 100;
   const R_p10 = feats[2], R_p90 = feats[3], G_p10 = feats[6], G_p90 = feats[7];
   const S_mean = feats[17], V_mean = feats[19], a_mean = feats[23];
-  if (a_mean < 140) score -= (140 - a_mean) * 2.5; 
-  if (S_mean < 90) score -= (90 - S_mean) * 1.0;   
+  
+  // Aggressively penalize non-pink/red tissue (like skin/forehead)
+  if (a_mean < 145) score -= (145 - a_mean) * 4.0; 
+  if (S_mean < 100) score -= (100 - S_mean) * 2.0;   
+  
   if (V_mean < 70) score -= (70 - V_mean) * 1.5;   
   if (V_mean > 210) score -= (V_mean - 210) * 1.5; 
   if (R_p10 < 0.15 && G_p10 < 0.15) score -= 15;   
