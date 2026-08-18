@@ -26,12 +26,12 @@ function rgb2lab(r, g, b) {
   let fY = Y > 0.008856 ? Math.pow(Y, 1/3) : (7.787 * Y) + (16 / 116);
   let fZ = Z > 0.008856 ? Math.pow(Z, 1/3) : (7.787 * Z) + (16 / 116);
   let L = (116 * fY) - 16;
-  let a = 500 * (fX - fY);
-  let b = 200 * (fY - fZ);
+  let lab_a = 500 * (fX - fY);
+  let lab_b = 200 * (fY - fZ);
   return [
     Math.round(L * 255 / 100),
-    Math.round(a + 128),
-    Math.round(b + 128)
+    Math.round(lab_a + 128),
+    Math.round(lab_b + 128)
   ];
 }
 
