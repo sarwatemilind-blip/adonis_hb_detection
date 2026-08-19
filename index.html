@@ -41,7 +41,7 @@ function closeCamera(){if(stream){stream.getTracks().forEach(t=>t.stop());stream
 function capture(){let v=document.getElementById('video'),c=document.getElementById('canvas');if(!v?.videoWidth){toast('Camera is not ready');return}c.width=v.videoWidth;c.height=v.videoHeight;c.getContext('2d').drawImage(v,0,0,c.width,c.height);c.toBlob(b=>{closeCamera();if(b)handleImageFile({target:{files:[new File([b],'eye.jpg',{type:'image/jpeg'})]}})},'image/jpeg',.92)}
 let cropperInstance = null;
 function handleImageFile(ev){let f=ev.target.files?.[0];if(!f)return;if(!f.type.startsWith('image/')){toast('Please choose an image');return}current.originalFile=f;let url=URL.createObjectURL(f);
-  document.getElementById('modalBox').innerHTML=`<div class="row between"><h2 class="section" style="margin:0">✂️ Crop Eye</h2><button class="btn ghost" onclick="closeCamera()">Cancel</button></div><p class="sub">Drag to crop tightly around the eye. Exclude surrounding skin/lips.</p><div style="max-height:60vh;margin:14px 0;background:#000"><img id="cropImg" src="${url}" style="max-width:100%;display:block;"></div><div class="row" style="justify-content:flex-end"><button class="btn green" onclick="doCropAndAnalyze()">Crop & Analyze →</button></div>`;
+  document.getElementById('modalBox').innerHTML=`<div class="row between"><h2 class="section" style="margin:0">✂️ Crop Eye</h2><button class="btn ghost" onclick="closeCamera()">Cancel</button></div><p class="sub"><b>Crop the pink tissue inside the lower eyelid.</b><br>Avoid skin, eyelashes, eyebrow and the white part of the eye.</p><div style="max-height:60vh;margin:14px 0;background:#000"><img id="cropImg" src="${url}" style="max-width:100%;display:block;"></div><div class="row" style="justify-content:flex-end"><button class="btn green" onclick="doCropAndAnalyze()">Crop & Analyze →</button></div>`;
   document.getElementById('modal').classList.remove('hidden');
   const image=document.getElementById('cropImg');
   image.onload=()=>{cropperInstance=new Cropper(image,{viewMode:1,dragMode:'crop',autoCropArea:0.8,restore:false,guides:true,center:true,highlight:false,cropBoxMovable:true,cropBoxResizable:true,toggleDragModeOnDblclick:false});};
@@ -53,6 +53,59 @@ function doCropAndAnalyze(){if(!cropperInstance)return;const canvas=cropperInsta
 async function loadOrtModel(){if(ortSession)return ortSession;if(modelLoading)return new Promise((res,rej)=>{const iv=setInterval(()=>{if(ortSession){clearInterval(iv);res(ortSession);}},150);setTimeout(()=>{clearInterval(iv);if(!ortSession)rej(new Error('Model load timeout'));},60000);});modelLoading=true;ort.env.wasm.wasmPaths='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';ortSession=await ort.InferenceSession.create('model.onnx',{executionProviders:['wasm']});modelLoading=false;return ortSession;}
 async function loadV2Model(){if(v2Session)return v2Session;if(v2Loading)return new Promise((res,rej)=>{const iv=setInterval(()=>{if(v2Session){clearInterval(iv);res(v2Session);}},150);setTimeout(()=>{clearInterval(iv);if(!v2Session)rej(new Error('V2 Model load timeout'));},60000);});v2Loading=true;try{v2Session=await ort.InferenceSession.create('eye_app_training_v1/hgb_regressor_image_only.onnx',{executionProviders:['wasm']});}catch(e){console.error(e);}v2Loading=false;return v2Session;}
 function switchCamera(){currentFacing=currentFacing==='environment'?'user':'environment';const btn=document.getElementById('camSwitchBtn');if(btn)btn.textContent=currentFacing==='environment'?'🤳 Selfie':'📷 Back cam';if(!stream)return;stream.getTracks().forEach(t=>t.stop());stream=null;const v=document.getElementById('video');if(!v)return;navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:currentFacing},width:{ideal:1280},height:{ideal:720}},audio:false}).then(s=>{stream=s;v.srcObject=s;v.play();}).catch(()=>toast('Could not switch camera'));}
+function validateManualCrop(imageData) {
+  let dark = 0, sclera = 0, pink = 0, total = 0;
+  const d = imageData.data;
+  
+  for(let i=0; i<d.length; i+=4) {
+    const r = d[i], g = d[i+1], b = d[i+2];
+    const L = 0.299*r + 0.587*g + 0.114*b;
+    total++;
+    
+    // Check dark (hair/shadows)
+    if (L < 40) {
+      dark++;
+      continue;
+    }
+    
+    // Check sclera (bright white/glare)
+    if (L > 200 || (r > 160 && Math.abs(r-g) < 20 && Math.abs(r-b) < 20)) {
+      sclera++;
+      continue;
+    }
+    
+    // Check pink/red tissue (conjunctiva vs skin)
+    // Skin is usually more yellowish/neutral, conjunctiva is saturated pink/red
+    // We use a simple redness vs greenness check
+    if (r > g * 1.2 && r > b * 1.2 && r > 80) {
+      pink++;
+    }
+  }
+  
+  const result = {
+    darkRatio: dark / total,
+    scleraRatio: sclera / total,
+    pinkRatio: pink / total,
+    passed: true,
+    reasons: []
+  };
+  
+  if (result.darkRatio > 0.25) {
+    result.passed = false;
+    result.reasons.push('Too much dark hair/eyelash/shadow');
+  }
+  if (result.scleraRatio > 0.30) {
+    result.passed = false;
+    result.reasons.push('Too much white sclera');
+  }
+  if (result.pinkRatio < 0.30) {
+    result.passed = false;
+    result.reasons.push('Insufficient pink conjunctival tissue');
+  }
+  
+  return result;
+}
+
 async function analyse(img,url){
   const resDiv=document.getElementById('imageResult');
   if(resDiv)resDiv.innerHTML='<div class="card" style="padding:20px;text-align:center"><span class="spinner"></span><span style="color:var(--muted);font-size:14px">Preparing…</span></div>';
@@ -62,6 +115,22 @@ async function analyse(img,url){
   const c=document.createElement('canvas'); c.width=w; c.height=h;
   const ctx=c.getContext('2d',{willReadFrequently:true}); ctx.drawImage(img,0,0,w,h);
   const d=ctx.getImageData(0,0,w,h).data;
+
+  // --- LAYER 1: MANUAL CROP CONTAMINATION CHECK ---
+  const manualCropCheck = validateManualCrop(ctx.getImageData(0,0,w,h));
+  console.log('Crop validation:\n' +
+    `darkRatio = ${(manualCropCheck.darkRatio*100).toFixed(1)}%\n` +
+    `scleraRatio = ${(manualCropCheck.scleraRatio*100).toFixed(1)}%\n` +
+    `pinkRatio = ${(manualCropCheck.pinkRatio*100).toFixed(1)}%\n` +
+    `result = ${manualCropCheck.passed ? 'ACCEPT' : 'REJECT'}\n` +
+    `reason = ${manualCropCheck.passed ? 'none' : manualCropCheck.reasons.join('; ')}`
+  );
+
+  if (!manualCropCheck.passed) {
+    if(resDiv)resDiv.innerHTML=`<div class="card" style="padding:14px"><div class="notice warning"><b>Unable to estimate Hb reliably from this image.</b><br><br>Please crop the pink tissue inside the lower eyelid, avoiding skin, eyelashes, eyebrow and the white of the eye.<br><br><span class="sub">Reason: ${manualCropCheck.reasons[0]}</span></div><div class="row" style="justify-content:flex-end;margin-top:14px;flex-wrap:wrap;gap:8px"><button class="btn ghost" onclick="openCapture()">Choose New Photograph</button><button class="btn primary" onclick="tryAnotherCrop()">Try Another Crop</button></div></div>`;
+    return;
+  }
+
 
   // V2: deterministic conjunctiva-focused region proposal.
   // We first exclude the outer 15% of the image (background/skin) and score small
@@ -189,7 +258,7 @@ async function analyse(img,url){
         if (v2QualityScore >= 50) {
             hbEstimateV2 = rawHbV2;
         } else {
-            v2Error = "Unable to estimate Hb reliably from this image. Please retake the photograph with the lower conjunctiva clearly visible.";
+            v2Error = "Unable to estimate Hb reliably from this image. Please crop the pink tissue inside the lower eyelid, avoiding skin, eyelashes, eyebrow and the white of the eye.";
         }
       } else {
         v2Error = "Unable to estimate Hb at this time. Please check your connection and try again.";
@@ -199,9 +268,6 @@ async function analyse(img,url){
       v2Error = "Unable to estimate Hb at this time. Please check your connection and try again.";
     }
     
-    // Log V1 internally for debug comparison
-    console.log('[DEBUG] V1 Estimate:', hbEstimate, '| V2 Estimate:', hbEstimateV2, '| V2 Quality:', v2QualityScore);
-
     let finalEstimate = hbEstimateV2 !== null ? Math.max(4, Math.min(20, Math.round(hbEstimateV2 * 10) / 10)) : null;
     let finalProb = finalEstimate !== null ? (finalEstimate < 11.0 ? 0.9 : 0.1) : null;
     let finalFlag = finalEstimate !== null ? (finalEstimate < 11.0 ? 'Anaemia screening indicator: Present' : 'Anaemia screening indicator: Not prominent') : 'Anaemia screening indicator: Unknown';
@@ -215,17 +281,25 @@ async function analyse(img,url){
       probAnemic: finalProb,
       quality: finalQuality,
       flag: finalFlag,
-      engine: 'Indian conjunctival model',
       cameraFacing: currentFacing
     };
+    
+    // Internal validation logging (Layer 2)
+    if (finalEstimate !== null) {
+      console.log(`[DEBUG] V1 Hb: ${hbEstimate} | V2 Hb: ${finalEstimate} | manualCrop darkRatio: ${(manualCropCheck.darkRatio).toFixed(3)} | manualCrop scleraRatio: ${(manualCropCheck.scleraRatio).toFixed(3)} | manualCrop pinkRatio: ${(manualCropCheck.pinkRatio).toFixed(3)} | V2 Quality Score: ${v2QualityScore} | V2 ACCEPTED`);
+    } else {
+      console.log(`[DEBUG] V1 Hb: ${hbEstimate} | manualCrop darkRatio: ${(manualCropCheck.darkRatio).toFixed(3)} | manualCrop scleraRatio: ${(manualCropCheck.scleraRatio).toFixed(3)} | manualCrop pinkRatio: ${(manualCropCheck.pinkRatio).toFixed(3)} | V2 Quality Score: ${v2QualityScore} | V2 REJECTED`);
+    }
+
+    save();
     showImage(url,current.result);
   }catch(e){
     console.error('AI inference:',e);
     if(resDiv)resDiv.innerHTML='<div class="card" style="padding:20px"><div class="notice warning">⚠️ AI analysis could not be completed. Please check your internet connection (the AI model requires ~18 MB on first load) and try again.</div><div class="row" style="justify-content:flex-end;margin-top:14px"><button class="btn ghost" onclick="openCapture()">🔄 Retake</button></div></div>';
   }
 }
-function showImage(url,res){document.getElementById('imageResult').innerHTML=`<div class="card" style="padding:14px"><img class="preview" src="${url}" alt="Captured lower conjunctiva"><div style="margin-top:14px">${(res && res.estimate !== null)?`<div class="grid g2"><div><div class="sub">Estimated Hb</div><div class="reading">${res.estimate.toFixed(1)} <span style="font-size:20px">g/dL</span></div><div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px"><span class="pill ${res.quality==='Good'?'good':'warn'}">Image quality: ${res.quality}</span></div><div class="footerNote" style="margin-top:8px">Engine: ${res.engine} · Camera: ${res.cameraFacing==='environment'?'Back':'Front'}</div></div><div><div class="sub">Screening observation</div><h3 style="margin:8px 0">${res.flag}</h3><p class="sub">This is an image-derived screening estimate only. Confirm with laboratory Hb/CBC before clinical decisions.</p></div></div>`:(res && res.v2Error)?`<div class="notice warning">${res.v2Error}</div>`:'<div class="notice warning">The image could not be assessed. Please capture a clear, well-lit close-up of the lower conjunctiva.</div>'}<div class="row" style="justify-content:flex-end;margin-top:14px;flex-wrap:wrap;gap:8px"><button class="btn ghost" onclick="openCapture()">Choose New Photograph</button><button class="btn primary" onclick="tryAnotherCrop()">Try Another Crop</button>${(res && res.estimate !== null)?'<button class="btn green" onclick="showReport()">Continue to Report →</button>':''}</div></div></div>`}
-function showReport(){document.getElementById('app').innerHTML=`<div class="topline"><div><h1 class="title">Hb Screening Report</h1><div class="sub">Step 3 of 3 — Review and share</div></div></div><div class="card" id="report"><div class="reportBrand"><div><h2 style="margin:0">ADONIS Hb SCREEN</h2><div class="sub">Conjunctival image haemoglobin screening</div></div><div class="reportLogos"><img class="mv" src="assets/MV30.png" alt="MV30"><img class="ag" src="assets/AMINO-GLOBIN-XT.png" alt="Amino Globin-XT"></div></div><hr style="border:0;border-top:1px solid var(--line);margin:16px 0"><div class="grid g3"><div><div class="sub">Patient</div><b>${esc(current.patient.name||'Not provided')}</b></div><div><div class="sub">Age / Sex</div><b>${esc(current.patient.age||'—')} / ${esc(current.patient.sex||'—')}</b></div><div><div class="sub">Screening Date</div><b>${formatScreenDate()}</b><div class="sub" style="margin-top:3px">Time: ${formatScreenTime()}</div></div></div><div class="grid g2" style="margin-top:18px"><div class="card" style="box-shadow:none;text-align:center"><div class="sub">Estimated Hb</div><div class="reading">${current.result.estimate !== null ? current.result.estimate.toFixed(1) + ' g/dL' : 'Not available'}</div><div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px;justify-content:center"><span class="pill ${current.result.quality==='Good'?'good':'warn'}">Image quality: ${current.result.quality}</span></div></div><div class="card" style="box-shadow:none"><div class="sub">Screening observation</div><h3>${current.result.flag}</h3><p class="sub">This AI screening estimate is derived from a conjunctival photograph. It is not equivalent to a laboratory haemoglobin measurement.</p></div></div><div class="footerNote" style="margin-top:14px">Engine: ${current.result.engine} · Camera: ${current.result.cameraFacing==='environment'?'Back':'Front'} · ${formatScreenDate()} ${formatScreenTime()}</div><div class="notice warning" style="margin-top:16px"><b>Clinical safety:</b> Confirm haemoglobin with an appropriate laboratory/validated measurement before diagnosis, treatment or other clinical decisions. Do not rely on this screening estimate alone.</div></div><div class="row" style="justify-content:flex-end;margin-top:16px;flex-wrap:wrap;gap:8px"><button class="btn ghost" onclick="openCapture()">Choose New Photograph</button><button class="btn primary" onclick="tryAnotherCrop()">Try Another Crop</button><button class="btn primary" onclick="shareReport()">📤 Send to Doctor</button><button class="btn ghost" onclick="window.print()">🖨 Print / Save PDF</button><button class="btn green" onclick="saveAndNew()">Save & Next Patient →</button></div>`}
+function showImage(url,res){document.getElementById('imageResult').innerHTML=`<div class="card" style="padding:14px"><img class="preview" src="${url}" alt="Captured lower conjunctiva"><div style="margin-top:14px">${(res && res.estimate !== null)?`<div class="grid g2"><div><div class="sub">Estimated Hb</div><div class="reading">${res.estimate.toFixed(1)} <span style="font-size:20px">g/dL</span></div><div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px"><span class="pill ${res.quality==='Good'?'good':'warn'}">Image quality: ${res.quality}</span></div><div class="footerNote" style="margin-top:8px">Camera: ${res.cameraFacing==='environment'?'Back':'Front'}</div></div><div><div class="sub">Screening observation</div><h3 style="margin:8px 0">${res.flag}</h3><p class="sub">This is an image-derived screening estimate only. Confirm with laboratory Hb/CBC before clinical decisions.</p></div></div>`:(res && res.v2Error)?`<div class="notice warning">${res.v2Error}</div>`:'<div class="notice warning">The image could not be assessed. Please capture a clear, well-lit close-up of the lower conjunctiva.</div>'}<div class="row" style="justify-content:flex-end;margin-top:14px;flex-wrap:wrap;gap:8px"><button class="btn ghost" onclick="openCapture()">Choose New Photograph</button><button class="btn primary" onclick="tryAnotherCrop()">Try Another Crop</button>${(res && res.estimate !== null)?'<button class="btn green" onclick="showReport()">Continue to Report →</button>':''}</div></div></div>`}
+function showReport(){document.getElementById('app').innerHTML=`<div class="topline"><div><h1 class="title">Hb Screening Report</h1><div class="sub">Step 3 of 3 — Review and share</div></div></div><div class="card" id="report"><div class="reportBrand"><div><h2 style="margin:0">ADONIS Hb SCREEN</h2><div class="sub">Conjunctival image haemoglobin screening</div></div><div class="reportLogos"><img class="mv" src="assets/MV30.png" alt="MV30"><img class="ag" src="assets/AMINO-GLOBIN-XT.png" alt="Amino Globin-XT"></div></div><hr style="border:0;border-top:1px solid var(--line);margin:16px 0"><div class="grid g3"><div><div class="sub">Patient</div><b>${esc(current.patient.name||'Not provided')}</b></div><div><div class="sub">Age / Sex</div><b>${esc(current.patient.age||'—')} / ${esc(current.patient.sex||'—')}</b></div><div><div class="sub">Screening Date</div><b>${formatScreenDate()}</b><div class="sub" style="margin-top:3px">Time: ${formatScreenTime()}</div></div></div><div class="grid g2" style="margin-top:18px"><div class="card" style="box-shadow:none;text-align:center"><div class="sub">Estimated Hb</div><div class="reading">${current.result.estimate !== null ? current.result.estimate.toFixed(1) + ' g/dL' : 'Not available'}</div><div style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px;justify-content:center"><span class="pill ${current.result.quality==='Good'?'good':'warn'}">Image quality: ${current.result.quality}</span></div></div><div class="card" style="box-shadow:none"><div class="sub">Screening observation</div><h3>${current.result.flag}</h3><p class="sub">This AI screening estimate is derived from a conjunctival photograph. It is not equivalent to a laboratory haemoglobin measurement.</p></div></div><div class="footerNote" style="margin-top:14px">Camera: ${current.result.cameraFacing==='environment'?'Back':'Front'} · ${formatScreenDate()} ${formatScreenTime()}</div><div class="notice warning" style="margin-top:16px"><b>Clinical safety:</b> Confirm haemoglobin with an appropriate laboratory/validated measurement before diagnosis, treatment or other clinical decisions. Do not rely on this screening estimate alone.</div></div><div class="row" style="justify-content:flex-end;margin-top:16px;flex-wrap:wrap;gap:8px"><button class="btn ghost" onclick="openCapture()">Choose New Photograph</button><button class="btn primary" onclick="tryAnotherCrop()">Try Another Crop</button><button class="btn primary" onclick="shareReport()">📤 Send to Doctor</button><button class="btn ghost" onclick="window.print()">🖨 Print / Save PDF</button><button class="btn green" onclick="saveAndNew()">Save & Next Patient →</button></div>`}
 function reportText(){return `ADONIS Hb SCREEN — HAEMOGLOBIN SCREENING\nScreening Date: ${formatScreenDate()}\nScreening Time: ${formatScreenTime()}\nPatient: ${current.patient.name||'Not provided'}\nAge/Sex: ${current.patient.age||'—'} / ${current.patient.sex||'—'}\nEstimated Hb: ${current.result.estimate !== null ? current.result.estimate.toFixed(1) + ' g/dL' : 'Not available (Image quality insufficient)'}\nImage quality: ${current.result.quality}\nScreening observation: ${current.result.flag}\n\nThis is an image-derived screening estimate from a lower-conjunctival photograph. Confirm with laboratory/validated haemoglobin measurement before clinical decisions.`}
 async function shareReport(){let text=reportText();if(navigator.share){try{await navigator.share({title:'Adonis Hb Screening Report',text})}catch(e){}}else{await navigator.clipboard?.writeText(text);toast('Report copied. Paste into WhatsApp/email.')}}
 function saveAndNew(){db.screenings.unshift({id:crypto.randomUUID?.()||Date.now().toString(),created:Date.now(),patient:current.patient,estimate:current.result.estimate,quality:current.result.quality,flag:current.result.flag});save();toast('Screening saved');setTimeout(()=>newScreening(),400)}
